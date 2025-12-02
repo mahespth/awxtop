@@ -3,6 +3,10 @@
 AAP Environment Monitor (Controller Dashboard)
 =============================================
 
+
+Author: Steve Maher, AIXtreme Research Ltd.
+License: GPLv3+
+
 Description
 -----------
 Curses-based terminal dashboard to monitor a Red Hat Ansible Automation Platform
@@ -12,6 +16,8 @@ It:
 - Connects to an AAP Controller using a Bearer token **or** a username/password
   (a token will be requested automatically).
 - Polls the Controller every few seconds.
+- Optionally polls one or more Gateway endpoints and renders a rolling status
+  graph (and error counts) in the same UI.
 - Shows Controller topology (instances) and their health using a colored
   GOOD/WARN/BAD/UNKNOWN scheme, including:
     - Node type/state
@@ -59,15 +65,19 @@ Controller endpoints:
 
 - Instances (topology):
     GET /api/controller/v2/instances/
+    GET /api/v2/instances/           (AWX / AAP 2.4 direct controller)
 
 - Recent jobs (all statuses):
     GET /api/controller/v2/jobs/?order_by=-started&page_size=N
+    GET /api/v2/jobs/?order_by=-started&page_size=N
 
 - Job detail:
     GET /api/controller/v2/jobs/<id>/
+    GET /api/v2/jobs/<id>/
 
 - Job stdout:
     GET /api/controller/v2/jobs/<id>/stdout/?format=txt
+    GET /api/v2/jobs/<id>/stdout/?format=txt
 
 Authentication
 --------------
@@ -80,8 +90,8 @@ providing `--username` (and optionally `--password`).
 
 - Username/password:
     A short-lived token is requested from
-    `/api/controller/v2/tokens/` using HTTP Basic auth and then used for all
-    subsequent requests.
+    `/api/controller/v2/tokens/` (or `/api/v2/tokens/`) using HTTP Basic auth
+    and then used for all subsequent requests.
 
 If your environment uses a different auth header (e.g. "Token"), adjust
 AUTH_SCHEME below.
@@ -95,6 +105,8 @@ Main dashboard:
                        if no selection, prompt for job ID
 - i                  : show/hide inline job info (metadata only, no stdout);
                        if no selection, prompt for job ID
+- g                  : toggle gateway status graph (if gateways configured)
+- G                  : toggle gateway graph plus error messages/counts
 - q or ESC           : quit the program
 
 Job view:
@@ -401,6 +413,51 @@ def check_gateway_endpoint(endpoint, token, timeout, insecure, use_ping):
         pass
 
     return "unknown", f"Unknown status response from {endpoint}{path}"
+
+
+# ---------------------------------------------------------------------------
+# UI helpers
+# ---------------------------------------------------------------------------
+
+HELP_LINES = [
+    "Keys:",
+    "  Up/Down, PgUp/PgDn : scroll job list",
+    "  Home / End         : jump to first / last job page",
+    "  v                  : view selected job (full screen with stdout)",
+    "  i                  : toggle inline job info panel",
+    "  g                  : toggle gateway status graph (if configured)",
+    "  G                  : toggle gateway graph with error counts",
+    "  h or ?             : show this help",
+    "  q or ESC           : quit",
+    "",
+    "Job view:",
+    "  Up/Down, PgUp/PgDn : scroll",
+    "  q or ESC           : return to dashboard",
+]
+
+
+def show_help_popup(stdscr):
+    """
+    Render a simple help overlay until a key is pressed.
+    """
+    h, w = stdscr.getmaxyx()
+    pad = 2
+    content_width = max(len(line) for line in HELP_LINES)
+    win_w = min(w - 4, content_width + pad * 2)
+    win_h = min(h - 4, len(HELP_LINES) + pad * 2)
+    start_y = max(1, (h - win_h) // 2)
+    start_x = max(1, (w - win_w) // 2)
+
+    win = curses.newwin(win_h, win_w, start_y, start_x)
+    win.box()
+    for idx, line in enumerate(HELP_LINES):
+        if idx + pad >= win_h - 1:
+            break
+        win.addstr(idx + pad, pad, line[: win_w - pad * 2], curses.color_pair(5))
+    win.addstr(win_h - 2, pad, "Press any key to close"[: win_w - pad * 2], curses.color_pair(4))
+    win.refresh()
+    win.getch()
+    # Clear overlay by refreshing parent on next loop
 
 
 def basic_auth_header(username, password):
@@ -1395,6 +1452,11 @@ def run_dashboard(
             # Quit
             if ch in (ord("q"), ord("Q"), 27):
                 break
+
+            # Help overlay
+            if ch in (ord("h"), ord("?"), ord("H")):
+                show_help_popup(stdscr)
+                continue
 
             # Helper to find first/last job row index
             def first_job_index():
