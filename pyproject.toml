@@ -20,7 +20,7 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
-aap-monitor = "awxtop.aap_monitor:main"
+awxtop = "awxtop.awxtop:main"
 
 [project.urls]
 Homepage = "https://github.com/mahespth/awxtop"
