@@ -25,9 +25,6 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.commands]
-bdist_wheel = { }
-
 [project.scripts]
 awxtop = "awxtop.awxtop:main"
 
