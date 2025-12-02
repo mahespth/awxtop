@@ -113,7 +113,7 @@ import ssl
 import socket
 import time
 from urllib import request, error
-from urllib.parse import urljoin, urlencode
+from urllib.parse import urljoin, urlencode, urlparse
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -126,6 +126,13 @@ AUTH_SCHEME = "Bearer"  # Change to "Token" if your AAP uses "Authorization: Tok
 DEFAULT_TIMEOUT = 5.0
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_PAGE_SIZE = 50
+DEFAULT_GATEWAY_INTERVAL = 1.0
+
+# Gateway API paths
+GATEWAY_STATUS_PATH = "/api/gateway/v1/status/"
+GATEWAY_PING_PATH = "/api/gateway/v1/ping/"
+# Limit retained gateway history to avoid unbounded growth
+MAX_GATEWAY_HISTORY = 500
 
 # API endpoint variants:
 # - AAP 2.5+ via gateway uses /api/controller/v2/...
@@ -296,6 +303,104 @@ def build_ssl_context(insecure=False):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+# ---------------------------------------------------------------------------
+# Gateway helpers
+# ---------------------------------------------------------------------------
+
+def gateway_status_char(status):
+    """
+    Map gateway status to a graph character and class.
+    """
+    if status == "good":
+        return ".", "good"
+    if status == "bad":
+        return "x", "bad"
+    if status == "unknown":
+        return "?", "unknown"
+    return " ", "unknown"
+
+
+def shorten_gateway_name(endpoint, show_full=False):
+    """
+    Produce a short display name for a gateway endpoint.
+    """
+    parsed = urlparse(endpoint)
+    host = parsed.netloc or parsed.path or endpoint
+    if show_full:
+        return host
+    if "." in host:
+        return host.split(".")[0]
+    return host
+
+
+def format_bad_percent(stats):
+    """
+    Calculate percentage of non-good requests (excluding unknown).
+    """
+    good = stats.get("good", 0)
+    bad = stats.get("bad", 0)
+    unknown = stats.get("unknown", 0)
+    denom = good + bad
+    if denom <= 0:
+        return "0.0%"
+    pct = (bad / denom) * 100.0
+    return f"{pct:4.1f}%"
+
+
+def check_gateway_endpoint(endpoint, token, timeout, insecure, use_ping):
+    """
+    Check a gateway endpoint, returning (status, error_message).
+    """
+    path = GATEWAY_PING_PATH if use_ping else GATEWAY_STATUS_PATH
+    try:
+        url = endpoint.rstrip("/") + path
+        headers = {
+            "Authorization": f"{AUTH_SCHEME} {token}",
+            "Accept": "application/json",
+        }
+        ctx = build_ssl_context(insecure)
+        req = request.Request(url, headers=headers)
+        with request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            code = resp.getcode()
+            body = resp.read().decode("utf-8", errors="replace")
+    except error.HTTPError as e:
+        return "bad", f"HTTP {e.code} on {endpoint}{path}: {e.reason}"
+    except error.URLError as e:
+        return "bad", f"URL error on {endpoint}{path}: {e.reason}"
+    except Exception as e:
+        return "bad", f"Exception on {endpoint}{path}: {e}"
+
+    if use_ping:
+        if 200 <= code < 300:
+            return "good", None
+        return "bad", f"Ping returned HTTP {code} on {endpoint}{path}"
+
+    # Interpret JSON status response
+    try:
+        data = json.loads(body)
+        if isinstance(data, dict):
+            overall = data.get("status")
+            if isinstance(overall, str):
+                s = overall.lower()
+                if s == "good":
+                    return "good", None
+                if s in ("bad", "error", "degraded"):
+                    return "bad", None
+            services = data.get("services")
+            if isinstance(services, list) and services:
+                bad_found = any(
+                    isinstance(svc, dict) and str(svc.get("status", "")).lower() in ("bad", "error", "degraded")
+                    for svc in services
+                )
+                if bad_found:
+                    return "bad", None
+                return "good", None
+    except Exception:
+        pass
+
+    return "unknown", f"Unknown status response from {endpoint}{path}"
 
 
 def basic_auth_header(username, password):
@@ -773,6 +878,11 @@ def run_dashboard(
     poll_interval,
     insecure=False,
     page_size=DEFAULT_PAGE_SIZE,
+    gateway_endpoints=None,
+    gateway_token=None,
+    gateway_interval=DEFAULT_GATEWAY_INTERVAL,
+    gateway_use_ping=False,
+    gateway_show_full=False,
 ):
     curses.curs_set(0)
     stdscr.nodelay(False)
@@ -792,6 +902,18 @@ def run_dashboard(
         "bad": curses.color_pair(3),
         "unknown": curses.color_pair(4),
     }
+
+    # Gateway state
+    gateway_endpoints = gateway_endpoints or []
+    gateway_token = gateway_token or token
+    gateway_histories = {ep: [] for ep in gateway_endpoints}
+    gateway_stats = {ep: {"good": 0, "bad": 0, "unknown": 0} for ep in gateway_endpoints}
+    gateway_error_counts = {ep: {} for ep in gateway_endpoints}
+    gateway_display_names = {
+        ep: shorten_gateway_name(ep, show_full=gateway_show_full) for ep in gateway_endpoints
+    }
+    gateway_display_mode = None  # None, "graph", or "errors"
+    gateway_last_fetch = 0.0
 
     instances = []
     inst_error = None
@@ -838,6 +960,28 @@ def run_dashboard(
                         jobs, jobs_error = result, err
 
                 last_fetch = time.time()
+
+            # Gateway polling
+            if gateway_endpoints and (now - gateway_last_fetch >= gateway_interval):
+                for ep in gateway_endpoints:
+                    status, err = check_gateway_endpoint(
+                        ep, gateway_token, timeout, insecure, gateway_use_ping
+                    )
+                    # history
+                    history = gateway_histories.get(ep, [])
+                    history.append(status)
+                    if len(history) > MAX_GATEWAY_HISTORY:
+                        history = history[-MAX_GATEWAY_HISTORY:]
+                    gateway_histories[ep] = history
+
+                    stats = gateway_stats.setdefault(ep, {"good": 0, "bad": 0, "unknown": 0})
+                    cls = status if status in ("good", "bad", "unknown") else "unknown"
+                    stats[cls] = stats.get(cls, 0) + 1
+
+                    if err:
+                        errs = gateway_error_counts.setdefault(ep, {})
+                        errs[err] = errs.get(err, 0) + 1
+                gateway_last_fetch = now
 
             # ------------------------------------------------------------------
             # Draw the screen
@@ -979,6 +1123,63 @@ def run_dashboard(
                     curses.color_pair(4),
                 )
                 row += 1
+
+            # ------------------------------------------------------------------
+            # Gateway health (toggle with g/G)
+            # ------------------------------------------------------------------
+            if gateway_display_mode and gateway_endpoints and row < h:
+                mode_text = "Gateway health (g=graph, G=graph+errors)"
+                stdscr.addstr(row, 0, mode_text[: w - 1], curses.color_pair(5))
+                row += 1
+
+                label_width = max((len(name) for name in gateway_display_names.values()), default=8)
+                label_width = max(label_width, 8)
+                graph_width = max(10, w - label_width - 20)
+
+                for ep in gateway_endpoints:
+                    if row >= h:
+                        break
+                    name = gateway_display_names.get(ep, ep)
+                    history = gateway_histories.get(ep, [])
+                    stats = gateway_stats.get(ep, {"good": 0, "bad": 0, "unknown": 0})
+                    errors = gateway_error_counts.get(ep, {})
+
+                    label = f"{name:<{label_width}} | "
+                    stdscr.addstr(row, 0, label[: w - 1], curses.color_pair(5))
+                    col = len(label)
+
+                    # Render graph history with per-status colour
+                    for st in history[-graph_width:]:
+                        ch, cls = gateway_status_char(st)
+                        color = color_for_class.get(cls, curses.color_pair(4))
+                        if col >= w - 1:
+                            break
+                        stdscr.addch(row, col, ch, color)
+                        col += 1
+                    row += 1
+
+                    if row >= h:
+                        break
+                    stats_line = (
+                        f"{' ' * (label_width + 3)}"
+                        f"good={stats.get('good', 0)} "
+                        f"bad={stats.get('bad', 0)} "
+                        f"unknown={stats.get('unknown', 0)} "
+                        f"not_good%={format_bad_percent(stats)}"
+                    )
+                    stdscr.addstr(row, 0, stats_line[: w - 1], curses.color_pair(5))
+                    row += 1
+
+                    if gateway_display_mode == "errors" and errors and row < h:
+                        for msg, count in errors.items():
+                            if row >= h:
+                                break
+                            err_line = f"{' ' * (label_width + 3)}{count}x {msg}"
+                            stdscr.addstr(row, 0, err_line[: w - 1], curses.color_pair(3))
+                            row += 1
+
+                    if row < h:
+                        row += 1  # spacing
 
             # ------------------------------------------------------------------
             # Recent jobs section (newest first by ID, running+pending first)
@@ -1298,6 +1499,13 @@ def run_dashboard(
                         info_job_detail = detail
                         info_job_error = err
 
+            # Gateway panel toggle
+            if gateway_endpoints:
+                if ch == ord("g"):
+                    gateway_display_mode = None if gateway_display_mode == "graph" else "graph"
+                elif ch == ord("G"):
+                    gateway_display_mode = None if gateway_display_mode == "errors" else "errors"
+
     except KeyboardInterrupt:
         return
     finally:
@@ -1355,6 +1563,32 @@ def parse_args():
         action="store_true",
         help="Skip TLS certificate verification.",
     )
+    p.add_argument(
+        "--gateway",
+        dest="gateways",
+        action="append",
+        help="Gateway base URL (repeatable). Enables gateway health panel (keys g/G).",
+    )
+    p.add_argument(
+        "--gateway-token",
+        help="Bearer token for gateways (defaults to controller token).",
+    )
+    p.add_argument(
+        "--gateway-interval",
+        type=float,
+        default=DEFAULT_GATEWAY_INTERVAL,
+        help=f"Gateway polling interval in seconds (default: {DEFAULT_GATEWAY_INTERVAL}).",
+    )
+    p.add_argument(
+        "--gateway-ping",
+        action="store_true",
+        help="Use /api/gateway/v1/ping/ instead of /status/ for gateway checks.",
+    )
+    p.add_argument(
+        "--gateway-show-full",
+        action="store_true",
+        help="Show full gateway hostname instead of shortened label.",
+    )
     return p.parse_args()
 
 
@@ -1394,6 +1628,14 @@ def resolve_token(args):
 def main():
     args = parse_args()
     token = resolve_token(args)
+    gateways = []
+    if args.gateways:
+        for g in args.gateways:
+            for item in str(g).split(","):
+                item = item.strip()
+                if item:
+                    gateways.append(item)
+    gateway_token = args.gateway_token or token
     try:
         curses.wrapper(
             run_dashboard,
@@ -1403,6 +1645,11 @@ def main():
             args.poll_interval,
             args.insecure,
             args.page_size,
+            gateways,
+            gateway_token,
+            args.gateway_interval,
+            args.gateway_ping,
+            args.gateway_show_full,
         )
     except KeyboardInterrupt:
         pass

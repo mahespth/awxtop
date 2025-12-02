@@ -29,5 +29,18 @@ aap-monitor https://gateway.example.com --token MYTOKEN
 When pointing directly at a controller without a gateway (AAP 2.4 / AWX), use
 the controller URL, e.g. `aap-monitor https://awx.example.com --token ...`
 
+### Gateway health view
+
+Pass one or more gateways to enable the gateway health panel:
+
+```bash
+aap-monitor https://gateway.example.com --token MYTOKEN --gateway https://gateway.example.com
+```
+
+During the UI:
+- Press `g` to toggle a rolling graph of gateway status.
+- Press `G` to toggle the graph plus the accumulated error messages and counts.
+  Press again to hide.
+
 Use `--help` to see all flags, including TLS options and polling interval
 controls.
