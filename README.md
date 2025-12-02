@@ -6,6 +6,10 @@ and recent jobs in a terminal UI. Works with:
 - AAP 2.5+ via gateway (`https://gateway.example.com/`)
 - AAP 2.4 / AWX directly against the controller (`https://controller.example.com/`)
 
+## Author
+
+Created by Mahesh Parthasarathy (mahespth).
+
 ## Installation
 
 ```bash
@@ -41,6 +45,14 @@ During the UI:
 - Press `g` to toggle a rolling graph of gateway status.
 - Press `G` to toggle the graph plus the accumulated error messages and counts.
   Press again to hide.
+- Press `v` to view a job (full screen).
+- Press `i` to toggle inline job info.
+- Press `h` or `?` for the help popup listing keys.
+- Press `q` or `ESC` to quit.
 
 Use `--help` to see all flags, including TLS options and polling interval
 controls.
+
+## Project updates
+
+See `MAINTAINERS.md` for maintainer info and submission guidelines.
