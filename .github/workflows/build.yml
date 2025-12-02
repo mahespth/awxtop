@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install build tools
-        run: python -m pip install --upgrade pip build
+        run: python -m pip install --upgrade pip build wheel
 
       - name: Install project (editable) and test deps
         run: python -m pip install -e . pytest
