@@ -8,7 +8,7 @@ and recent jobs in a terminal UI. Works with:
 
 ## Author
 
-Created by Mahesh Parthasarathy (mahespth).
+Created by Steve Maher (https://github.com/mahespth/awxtop)
 
 ## Installation
 
@@ -52,7 +52,3 @@ During the UI:
 
 Use `--help` to see all flags, including TLS options and polling interval
 controls.
-
-## Project updates
-
-See `MAINTAINERS.md` for maintainer info and submission guidelines.
