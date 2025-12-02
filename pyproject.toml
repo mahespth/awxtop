@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "awxtop"
+version = "0.1.0"
+description = "Curses-based dashboard for AWX / AAP controllers (topology + jobs)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+  {name = "awxtop"},
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.scripts]
+aap-monitor = "awxtop.aap_monitor:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/awxtop"
