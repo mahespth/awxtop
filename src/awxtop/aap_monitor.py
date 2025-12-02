@@ -6,7 +6,7 @@ AAP Environment Monitor (Controller Dashboard)
 Description
 -----------
 Curses-based terminal dashboard to monitor a Red Hat Ansible Automation Platform
-(AAP) 2.5 Controller environment (via Automation Gateway or directly).
+(AAP) Controller environment (via Automation Gateway or directly, including AWX).
 
 It:
 - Connects to an AAP Controller using a Bearer token **or** a username/password
@@ -126,7 +126,30 @@ AUTH_SCHEME = "Bearer"  # Change to "Token" if your AAP uses "Authorization: Tok
 DEFAULT_TIMEOUT = 5.0
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_PAGE_SIZE = 50
-TOKEN_ENDPOINT = "/api/controller/v2/tokens/"
+
+# API endpoint variants:
+# - AAP 2.5+ via gateway uses /api/controller/v2/...
+# - AAP 2.4 / AWX (no gateway) uses /api/v2/...
+TOKEN_ENDPOINTS = [
+    "/api/controller/v2/tokens/",
+    "/api/v2/tokens/",
+]
+INSTANCE_ENDPOINTS = [
+    "/api/controller/v2/instances/",
+    "/api/v2/instances/",
+]
+JOBS_ENDPOINTS = [
+    "/api/controller/v2/jobs/",
+    "/api/v2/jobs/",
+]
+JOB_DETAIL_ENDPOINTS = [
+    "/api/controller/v2/jobs/{id}/",
+    "/api/v2/jobs/{id}/",
+]
+JOB_STDOUT_ENDPOINTS = [
+    "/api/controller/v2/jobs/{id}/stdout/",
+    "/api/v2/jobs/{id}/stdout/",
+]
 
 # Host running this monitor
 MONITOR_HOST = socket.gethostname()
@@ -291,8 +314,6 @@ def request_token_with_password(base_url, username, password, timeout, insecure=
     Returns (token, error_message).
     """
     base_url = base_url.rstrip("/") + "/"
-    url = urljoin(base_url, TOKEN_ENDPOINT.lstrip("/"))
-
     headers = {
         "Authorization": basic_auth_header(username, password),
         "Accept": "application/json",
@@ -303,31 +324,36 @@ def request_token_with_password(base_url, username, password, timeout, insecure=
     }).encode("utf-8")
 
     ctx = build_ssl_context(insecure)
-    req = request.Request(url, data=payload, headers=headers, method="POST")
+    last_err = None
 
-    try:
-        with request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            data = json.loads(raw)
-            token = data.get("token") if isinstance(data, dict) else None
-            if not token:
-                return None, "Token response missing 'token' field"
-            return token, None
-    except error.HTTPError as e:
-        # Try to surface any API error details
-        detail = ""
+    for endpoint in TOKEN_ENDPOINTS:
+        url = urljoin(base_url, endpoint.lstrip("/"))
+        req = request.Request(url, data=payload, headers=headers, method="POST")
+
         try:
-            detail_raw = e.read().decode("utf-8", errors="replace")
-            if detail_raw:
-                detail_data = json.loads(detail_raw)
-                detail = f" ({detail_data})" if detail_data else ""
-        except Exception:
+            with request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                data = json.loads(raw)
+                token = data.get("token") if isinstance(data, dict) else None
+                if token:
+                    return token, None
+                last_err = "Token response missing 'token' field"
+        except error.HTTPError as e:
             detail = ""
-        return None, f"HTTP {e.code} obtaining token: {e.reason}{detail}"
-    except error.URLError as e:
-        return None, f"URL error obtaining token: {e.reason}"
-    except Exception as e:
-        return None, f"Exception obtaining token: {e}"
+            try:
+                detail_raw = e.read().decode("utf-8", errors="replace")
+                if detail_raw:
+                    detail_data = json.loads(detail_raw)
+                    detail = f" ({detail_data})" if detail_data else ""
+            except Exception:
+                detail = ""
+            last_err = f"HTTP {e.code} obtaining token via {endpoint}: {e.reason}{detail}"
+        except error.URLError as e:
+            last_err = f"URL error obtaining token via {endpoint}: {e.reason}"
+        except Exception as e:
+            last_err = f"Exception obtaining token via {endpoint}: {e}"
+
+    return None, last_err
 
 
 def api_get(base_url, path, token, timeout, insecure=False, query=None):
@@ -382,19 +408,22 @@ def fetch_instances(base_url, token, timeout, insecure=False):
     """
     Fetch Controller instances (cluster topology).
     """
-    try:
-        data = api_get(base_url, "/api/controller/v2/instances/", token, timeout, insecure)
-        if isinstance(data, dict) and isinstance(data.get("results"), list):
-            return data["results"], None
-        if isinstance(data, list):
-            return data, None
-        return [], "Unexpected /api/controller/v2/instances/ format"
-    except error.HTTPError as e:
-        return [], f"HTTP {e.code} on /instances/: {e.reason}"
-    except error.URLError as e:
-        return [], f"URL error on /instances/: {e.reason}"
-    except Exception as e:
-        return [], f"Exception on /instances/: {e}"
+    last_err = None
+    for endpoint in INSTANCE_ENDPOINTS:
+        try:
+            data = api_get(base_url, endpoint, token, timeout, insecure)
+            if isinstance(data, dict) and isinstance(data.get("results"), list):
+                return data["results"], None
+            if isinstance(data, list):
+                return data, None
+            last_err = f"Unexpected {endpoint} format"
+        except error.HTTPError as e:
+            last_err = f"HTTP {e.code} on {endpoint}: {e.reason}"
+        except error.URLError as e:
+            last_err = f"URL error on {endpoint}: {e.reason}"
+        except Exception as e:
+            last_err = f"Exception on {endpoint}: {e}"
+    return [], last_err
 
 
 def fetch_recent_jobs(base_url, token, timeout, insecure=False, page_size=DEFAULT_PAGE_SIZE):
@@ -405,63 +434,76 @@ def fetch_recent_jobs(base_url, token, timeout, insecure=False, page_size=DEFAUL
         "order_by": "-started",
         "page_size": page_size,
     }
-    try:
-        data = api_get(base_url, "/api/controller/v2/jobs/", token, timeout, insecure, query=query)
-        results = data.get("results") if isinstance(data, dict) else None
-        if not isinstance(results, list):
-            return [], "Unexpected /api/controller/v2/jobs/ format"
-        return results, None
-    except error.HTTPError as e:
-        return [], f"HTTP {e.code} on /jobs/: {e.reason}"
-    except error.URLError as e:
-        return [], f"URL error on /jobs/: {e.reason}"
-    except Exception as e:
-        return [], f"Exception on /jobs/: {e}"
+    last_err = None
+    for endpoint in JOBS_ENDPOINTS:
+        try:
+            data = api_get(base_url, endpoint, token, timeout, insecure, query=query)
+            results = data.get("results") if isinstance(data, dict) else None
+            if not isinstance(results, list):
+                last_err = f"Unexpected {endpoint} format"
+                continue
+            return results, None
+        except error.HTTPError as e:
+            last_err = f"HTTP {e.code} on {endpoint}: {e.reason}"
+        except error.URLError as e:
+            last_err = f"URL error on {endpoint}: {e.reason}"
+        except Exception as e:
+            last_err = f"Exception on {endpoint}: {e}"
+    return [], last_err
 
 
 def fetch_job_detail(base_url, token, timeout, insecure, job_id):
     """
     Fetch a single job's details.
     """
-    try:
-        job = api_get(
-            base_url,
-            f"/api/controller/v2/jobs/{job_id}/",
-            token,
-            timeout,
-            insecure,
-        )
-        if not isinstance(job, dict):
-            return None, "Unexpected job detail format"
-        return job, None
-    except error.HTTPError as e:
-        return None, f"HTTP {e.code} on job {job_id}: {e.reason}"
-    except error.URLError as e:
-        return None, f"URL error on job {job_id}: {e.reason}"
-    except Exception as e:
-        return None, f"Exception on job {job_id}: {e}"
+    last_err = None
+    for pattern in JOB_DETAIL_ENDPOINTS:
+        endpoint = pattern.format(id=job_id)
+        try:
+            job = api_get(
+                base_url,
+                endpoint,
+                token,
+                timeout,
+                insecure,
+            )
+            if not isinstance(job, dict):
+                last_err = f"Unexpected job detail format from {endpoint}"
+                continue
+            return job, None
+        except error.HTTPError as e:
+            last_err = f"HTTP {e.code} on job {job_id} via {endpoint}: {e.reason}"
+        except error.URLError as e:
+            last_err = f"URL error on job {job_id} via {endpoint}: {e.reason}"
+        except Exception as e:
+            last_err = f"Exception on job {job_id} via {endpoint}: {e}"
+    return None, last_err
 
 
 def fetch_job_stdout(base_url, token, timeout, insecure, job_id):
     """
     Fetch job stdout as text.
     """
-    try:
-        text = api_get_text(
-            base_url,
-            f"/api/controller/v2/jobs/{job_id}/stdout/",
-            token,
-            timeout,
-            insecure,
-            query={"format": "txt"},
-        )
-        return text, None
-    except error.HTTPError as e:
-        return "", f"HTTP {e.code} on job {job_id} stdout: {e.reason}"
-    except error.URLError as e:
-        return "", f"URL error on job {job_id} stdout: {e.reason}"
-    except Exception as e:
-        return "", f"Exception on job {job_id} stdout: {e}"
+    last_err = None
+    for pattern in JOB_STDOUT_ENDPOINTS:
+        endpoint = pattern.format(id=job_id)
+        try:
+            text = api_get_text(
+                base_url,
+                endpoint,
+                token,
+                timeout,
+                insecure,
+                query={"format": "txt"},
+            )
+            return text, None
+        except error.HTTPError as e:
+            last_err = f"HTTP {e.code} on job {job_id} stdout via {endpoint}: {e.reason}"
+        except error.URLError as e:
+            last_err = f"URL error on job {job_id} stdout via {endpoint}: {e.reason}"
+        except Exception as e:
+            last_err = f"Exception on job {job_id} stdout via {endpoint}: {e}"
+    return "", last_err
 
 
 # ---------------------------------------------------------------------------

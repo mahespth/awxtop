@@ -23,4 +23,4 @@ dependencies = []
 aap-monitor = "awxtop.aap_monitor:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/awxtop"
+Homepage = "https://github.com/mahespth/awxtop"
