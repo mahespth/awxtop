@@ -1,5 +1,7 @@
 # awxtop
 
+https://github.com/mahespth/awxtop
+
 Curses-based monitor for AWX / AAP controllers that shows controller topology
 and recent jobs in a terminal UI. Works with:
 
@@ -8,7 +10,7 @@ and recent jobs in a terminal UI. Works with:
 
 ## Author
 
-Created by Steve Maher (https://github.com/mahespth/awxtop)
+Created by Steve Maher (mahespth).
 
 ## Installation
 

@@ -256,7 +256,18 @@ def parse_iso8601(dt_str):
     try:
         if dt_str.endswith("Z"):
             dt_str = dt_str[:-1] + "+00:00"
-        return datetime.fromisoformat(dt_str)
+        # Normalize timezone offset for strptime on Python 3.6 (%z expects HHMM)
+        if len(dt_str) > 6 and (dt_str[-6] in ("+", "-")) and dt_str[-3] == ":":
+            dt_str = dt_str[:-3] + dt_str[-2:]
+        if hasattr(datetime, "fromisoformat"):
+            return datetime.fromisoformat(dt_str)
+        # Python 3.6 fallback: handle basic patterns
+        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z"):
+            try:
+                return datetime.strptime(dt_str, fmt)
+            except Exception:
+                continue
+        return None
     except Exception:
         return None
 
